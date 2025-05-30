@@ -198,24 +198,6 @@ async def stream_openai_response(gemini_stream: Any, model: str):
         logger.warning("Client disconnected during final chunk (BrokenPipeError).")
         return
 
-    # Final chunk - streaming tamamlandı sinyali
-    final_chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-        }]
-    }
-    try:
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        yield "data: [DONE]\n\n" # Add DONE signal back for successful completion
-    except BrokenPipeError:
-        print("Client disconnected during final chunk (BrokenPipeError).")
-        return
 
 async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict, stream: bool = False) -> Any:
     """Make a request to the Gemini API with the specified API key and model."""
