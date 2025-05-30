@@ -175,6 +175,7 @@ async def stream_response(text: str, model: str):
         
         # DONE sinyali - streaming'in bittiğini belirten zorunlu sinyal
         try:
+            await asyncio.sleep(0.1) # Small delay before sending DONE
             yield "data: [DONE]\n\n"
         except BrokenPipeError:
             print("Client disconnected during DONE signal (BrokenPipeError).")
@@ -269,8 +270,7 @@ async def chat_completions(request: ChatRequest):
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "Content-Type": "text/event-stream",
-                    "Transfer-Encoding": "chunked"
+                    "Content-Type": "text/event-stream"
                 }
             )
         
