@@ -103,108 +103,112 @@ def convert_messages(messages):
         for msg in messages
     ]
 
-async def stream_response(text: str, model: str):
-    """Stream response in OpenAI format with proper completion"""
+async def stream_gemini_response(gemini_response: httpx.Response, model: str):
+    """Streams Gemini API response in OpenAI format."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    
-    try:
-        # Initial chunk - role başlangıcı
-        initial_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"role": "assistant"},
-                "finish_reason": None
-            }]
-        }
-        try:
-            yield f"data: {json.dumps(initial_chunk)}\n\n"
-        except BrokenPipeError:
-            print("Client disconnected during initial chunk (BrokenPipeError).")
-            return
-        
-        # Content chunks - metni parçalar halinde gönder
-        if text:
-            # Karakterleri 30-50 arası gruplar halinde böl (daha akıcı streaming için)
-            chunk_size = 35
-            for i in range(0, len(text), chunk_size):
-                chunk_text = text[i:i+chunk_size]
-                
-                content_chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": chunk_text},
-                        "finish_reason": None
-                    }]
-                }
-                
-                try:
-                    yield f"data: {json.dumps(content_chunk)}\n\n"
-                except BrokenPipeError:
-                    print("Client disconnected during content chunk (BrokenPipeError).")
-                    return
-                
-                # Küçük bir gecikme ekle (streaming efekti için)
-                await asyncio.sleep(0.02)
-        
-        # Final chunk - streaming tamamlandı sinyali
-        final_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        }
-        try:
-            yield f"data: {json.dumps(final_chunk)}\n\n"
-            # OpenAI API'sinde [DONE] sinyali genellikle son chunk'tan sonra ayrı bir data satırı olarak gönderilmez.
-            # finish_reason: "stop" ile son chunk'ın gelmesi yeterli olur.
-            # Eğer client hala bekliyorsa, bu client tarafındaki bir implementasyon farkı olabilir.
-            # Şimdilik, DONE sinyalini kaldırıp sadece son chunk ile bitmesini sağlayalım.
-            # await asyncio.sleep(0.1) # Small delay before sending DONE - removed as it's not needed if DONE is removed
-            # yield "data: [DONE]\n\n" # Removed
-        except BrokenPipeError:
-            print("Client disconnected during final chunk (BrokenPipeError).")
-            return
-        
-    except Exception as e:
-        # Hata durumunda da düzgün sonlandır
-        print(f"Error during streaming: {e}")
-        error_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "error"
-            }]
-        }
-        try:
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-            yield "data: [DONE]\n\n" # Keep DONE for error case to ensure client terminates
-        except BrokenPipeError:
-            # Client disconnected during error handling
-            print("Client disconnected during error handling (BrokenPipeError).")
 
-async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict):
+    # Initial chunk - role başlangıcı
+    initial_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant"},
+            "finish_reason": None
+        }]
+    }
+    try:
+        yield f"data: {json.dumps(initial_chunk)}\n\n"
+    except BrokenPipeError:
+        print("Client disconnected during initial chunk (BrokenPipeError).")
+        return
+
+    async for chunk in gemini_response.aiter_bytes():
+        try:
+            # Each chunk from Gemini is a complete JSON object, but the stream
+            # might concatenate them. We need to split them.
+            # Gemini's SSE stream uses 'data: ' prefix.
+            data_str = chunk.decode('utf-8')
+            for line in data_str.splitlines():
+                if line.startswith("data: "):
+                    json_str = line[len("data: "):]
+                    if json_str.strip(): # Ensure it's not an empty data line
+                        try:
+                            gemini_chunk = json.loads(json_str)
+                            if gemini_chunk.get("candidates"):
+                                for candidate in gemini_chunk["candidates"]:
+                                    if candidate.get("content") and candidate["content"].get("parts"):
+                                        for part in candidate["content"]["parts"]:
+                                            if part.get("text"):
+                                                content_chunk = {
+                                                    "id": chunk_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": created,
+                                                    "model": model,
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": {"content": part["text"]},
+                                                        "finish_reason": None
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(content_chunk)}\n\n"
+                        except json.JSONDecodeError:
+                            print(f"JSON Decode Error for chunk: {json_str}")
+                elif line.strip() == "": # End of data block
+                    pass
+        except BrokenPipeError:
+            print("Client disconnected during content chunk (BrokenPipeError).")
+            return
+        except Exception as e:
+            print(f"Error processing Gemini stream chunk: {e}")
+            error_chunk = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "error"
+                }]
+            }
+            try:
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+            except BrokenPipeError:
+                print("Client disconnected during error handling (BrokenPipeError).")
+            return
+
+    # Final chunk - streaming tamamlandı sinyali
+    final_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }]
+    }
+    try:
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+    except BrokenPipeError:
+        print("Client disconnected during final chunk (BrokenPipeError).")
+        return
+
+async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict, stream: bool = False):
     """Gemini API'ye request yapar"""
     async with httpx.AsyncClient(timeout=45) as client:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        if stream:
+            url += "?alt=sse" # Use Server-Sent Events for streaming
+
         response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            url,
             json={
                 "contents": messages,
                 "generationConfig": generation_config
@@ -235,10 +239,11 @@ async def chat_completions(request: ChatRequest):
         
         # Gemini API çağrısı
         response = await make_gemini_request(
-            api_key, 
-            request.model, 
-            gemini_messages, 
-            generation_config
+            api_key,
+            request.model,
+            gemini_messages,
+            generation_config,
+            stream=request.stream # Pass stream parameter
         )
         
         if not response.is_success:
@@ -247,23 +252,9 @@ async def chat_completions(request: ChatRequest):
                 error_detail = "Rate limit exceeded, trying another key"
             raise HTTPException(status_code=response.status_code, detail=error_detail)
 
-        result = response.json()
-
-        # Extract text from response
-        text = ""
-        if result.get("candidates") and len(result["candidates"]) > 0:
-            candidate = result["candidates"][0]
-            if candidate.get("content") and candidate["content"].get("parts"):
-                text = "".join(part.get("text", "") for part in candidate["content"]["parts"])
-
-        # Ensure text is at least an empty string if no content is found
-        if not text:
-            text = ""
-
-        # Streaming response
         if request.stream:
             return StreamingResponse(
-                stream_response(text, request.model),
+                stream_gemini_response(response, request.model),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -271,8 +262,15 @@ async def chat_completions(request: ChatRequest):
                     "Content-Type": "text/event-stream"
                 }
             )
-        
-        # Regular response
+
+        # Regular response (non-streaming)
+        result = response.json()
+        text = ""
+        if result.get("candidates") and len(result["candidates"]) > 0:
+            candidate = result["candidates"][0]
+            if candidate.get("content") and candidate["content"].get("parts"):
+                text = "".join(part.get("text", "") for part in candidate["content"]["parts"])
+
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -295,37 +293,6 @@ async def chat_completions(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
-@app.get("/v1/models")
-async def list_models():
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "gemini-pro",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "google"
-            },
-            {
-                "id": "gemini-pro-vision", 
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "google"
-            },
-            {
-                "id": "gemini-1.5-pro",
-                "object": "model", 
-                "created": int(time.time()),
-                "owned_by": "google"
-            },
-            {
-                "id": "gemini-1.5-flash",
-                "object": "model",
-                "created": int(time.time()), 
-                "owned_by": "google"
-            }
-        ]
-    }
 
 @app.get("/health")
 async def health():
