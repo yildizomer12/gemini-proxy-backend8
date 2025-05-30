@@ -4,11 +4,21 @@ import time
 import json
 import asyncio
 import base64
-from typing import List, Dict, Any, Union, Optional
-from fastapi import FastAPI, HTTPException
+import logging
+from typing import List, Dict, Any, Union, Optional, Tuple
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-import httpx
+from pydantic import BaseModel, ValidationError
+import google.generativeai as genai
+from google.api_core.exceptions import GoogleAPIError
+import httpx # Keep httpx for now, might be needed for other things or remove later
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # FastAPI app
 app = FastAPI(title="Gemini Backend for Vercel")
@@ -103,8 +113,8 @@ def convert_messages(messages):
         for msg in messages
     ]
 
-async def stream_gemini_response(gemini_response: httpx.Response, model: str):
-    """Streams Gemini API response in OpenAI format."""
+async def stream_openai_response(gemini_stream: Any, model: str):
+    """Stream Gemini response in OpenAI-compatible chunked format."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
@@ -123,114 +133,70 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
     try:
         yield f"data: {json.dumps(initial_chunk)}\n\n"
     except BrokenPipeError:
-        print("Client disconnected during initial chunk (BrokenPipeError).")
+        logger.warning("Client disconnected during initial chunk (BrokenPipeError).")
         return
 
-    # Keep track if a finish reason has been explicitly sent from Gemini
-    finish_sent = False
+    try:
+        for response_chunk in gemini_stream:
+            content = getattr(response_chunk, "text", "")
+            if content:
+                content_chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": content},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(content_chunk)}\n\n"
+            
+            # Check for finish_reason from Gemini's response_chunk (if available)
+            # The genai library handles finish reasons internally, and the stream
+            # will naturally end. We just need to send the final stop chunk.
 
-    async for chunk in gemini_response.aiter_bytes():
-        try:
-            data_str = chunk.decode('utf-8')
-            for line in data_str.splitlines():
-                if line.startswith("data: "):
-                    json_str = line[len("data: "):]
-                    if json_str.strip(): # Ensure it's not an empty data line
-                        try:
-                            gemini_chunk = json.loads(json_str)
-                            if gemini_chunk.get("candidates"):
-                                for candidate in gemini_chunk["candidates"]:
-                                    gemini_finish_reason = candidate.get("finishReason")
-                                    
-                                    # Extract content, if any
-                                    content_text = ""
-                                    if candidate.get("content") and candidate["content"].get("parts"):
-                                        for part in candidate["content"]["parts"]:
-                                            if part.get("text"):
-                                                content_text = part["text"]
-                                                break # Assuming one text part per chunk for simplicity
+            await asyncio.sleep(0) # Allow other tasks to run
 
-                                    # Send content chunk if there is text
-                                    if content_text:
-                                        content_chunk = {
-                                            "id": chunk_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created,
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {"content": content_text},
-                                                "finish_reason": None # No finish reason in content chunks
-                                            }]
-                                        }
-                                        yield f"data: {json.dumps(content_chunk)}\n\n"
-                                    
-                                    # If Gemini sends a finish reason, send the final empty delta chunk
-                                    if gemini_finish_reason:
-                                        finish_sent = True
-                                        final_empty_delta_chunk = {
-                                            "id": chunk_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created,
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {}, # Empty delta
-                                                "finish_reason": "stop" # Always "stop" for normal completion
-                                            }]
-                                        }
-                                        yield f"data: {json.dumps(final_empty_delta_chunk)}\n\n"
-                                        yield "data: [DONE]\n\n"
-                                        return # Terminate the generator after sending DONE
-                                        
-                        except json.JSONDecodeError:
-                            print(f"JSON Decode Error for chunk: {json_str}")
-                elif line.strip() == "": # End of data block (empty line after data)
-                    pass
-        except BrokenPipeError:
-            print("Client disconnected during content chunk (BrokenPipeError).")
-            return
-        except Exception as e:
-            print(f"Error processing Gemini stream chunk: {e}")
-            # Error handling chunk, always send DONE
-            error_chunk = {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "error"
-                }]
-            }
-            try:
-                yield f"data: {json.dumps(error_chunk)}\n\n"
-                yield "data: [DONE]\n\n"
-            except BrokenPipeError:
-                print("Client disconnected during error handling (BrokenPipeError).")
-            return
-
-    # Fallback: If the loop finishes without an explicit finishReason from Gemini,
-    # ensure the final "stop" chunk and DONE signal are sent.
-    if not finish_sent:
-        final_chunk = {
+    except Exception as e:
+        logger.error("Streaming error: %s", str(e))
+        error_chunk = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
             "choices": [{
                 "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
+                "delta": {"content": f"Streaming error: {str(e)}"},
+                "finish_reason": "error"
             }]
         }
         try:
-            yield f"data: {json.dumps(final_chunk)}\n\n"
+            yield f"data: {json.dumps(error_chunk)}\n\n"
             yield "data: [DONE]\n\n"
         except BrokenPipeError:
-            print("Client disconnected during final chunk (BrokenPipeError).")
-            return
+            logger.warning("Client disconnected during error handling (BrokenPipeError).")
+        return
+
+    # Final chunk - streaming tamamlandı sinyali (empty delta, finish_reason "stop")
+    final_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {}, # Empty delta
+            "finish_reason": "stop"
+        }]
+    }
+    try:
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+    except BrokenPipeError:
+        logger.warning("Client disconnected during final chunk (BrokenPipeError).")
+        return
 
     # Final chunk - streaming tamamlandı sinyali
     final_chunk = {
@@ -251,35 +217,26 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
         print("Client disconnected during final chunk (BrokenPipeError).")
         return
 
-async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict, stream: bool = False):
-    """Gemini API'ye request yapar"""
-    async with httpx.AsyncClient(timeout=45) as client:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        if stream:
-            url += "?alt=sse" # Use Server-Sent Events for streaming
+async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict, stream: bool = False) -> Any:
+    """Make a request to the Gemini API with the specified API key and model."""
+    genai.configure(api_key=api_key)
+    gemini_model = genai.GenerativeModel(model)
 
-        response = await client.post(
-            url,
-            json={
-                "contents": messages,
-                "generationConfig": generation_config
-            },
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key
-            }
-        )
-        return response
+    try:
+        return gemini_model.generate_content(contents=messages, generation_config=generation_config, stream=stream)
+    except Exception as e:
+        logger.error("Error making Gemini request: %s", str(e))
+        raise
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatRequest):
+async def chat_completions(request: ChatRequest): # Keep ChatRequest for now, will refactor to use Request later if needed
     try:
         # Convert messages
         gemini_messages = convert_messages(request.messages)
         generation_config = {
             "temperature": request.temperature,
-            "topK": 40,
-            "topP": 0.95
+            "topK": 40, # Assuming default as in previous code
+            "topP": 0.95 # Assuming default as in previous code
         }
         
         if request.max_tokens:
@@ -297,15 +254,9 @@ async def chat_completions(request: ChatRequest):
             stream=request.stream # Pass stream parameter
         )
         
-        if not response.is_success:
-            error_detail = f"Gemini API error: {response.status_code} - {response.text}"
-            if response.status_code == 429:
-                error_detail = "Rate limit exceeded, trying another key"
-            raise HTTPException(status_code=response.status_code, detail=error_detail)
-
         if request.stream:
             return StreamingResponse(
-                stream_gemini_response(response, request.model),
+                stream_openai_response(response, request.model),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -315,12 +266,11 @@ async def chat_completions(request: ChatRequest):
             )
 
         # Regular response (non-streaming)
-        result = response.json()
         text = ""
-        if result.get("candidates") and len(result["candidates"]) > 0:
-            candidate = result["candidates"][0]
-            if candidate.get("content") and candidate["content"].get("parts"):
-                text = "".join(part.get("text", "") for part in candidate["content"]["parts"])
+        if response.candidates and len(response.candidates) > 0:
+            candidate = response.candidates[0]
+            if candidate.content and candidate.content.parts:
+                text = "".join(part.text for part in candidate.content.parts if part.text)
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -333,7 +283,7 @@ async def chat_completions(request: ChatRequest):
                 "finish_reason": "stop"
             }],
             "usage": {
-                "prompt_tokens": len(str(request.messages)),
+                "prompt_tokens": len(str(request.messages)), # This will be inaccurate for genai, but keeping for now
                 "completion_tokens": len(text),
                 "total_tokens": len(str(request.messages)) + len(text)
             }
@@ -341,7 +291,14 @@ async def chat_completions(request: ChatRequest):
         
     except HTTPException:
         raise
+    except GoogleAPIError as e:
+        logger.error("Gemini API error: %s", str(e))
+        if "Quota exceeded" in str(e) or "Resource has been exhausted" in str(e):
+            # For now, just raise 429. No retry logic from the example yet.
+            raise HTTPException(status_code=429, detail="Rate limit exceeded for Gemini API")
+        raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
     except Exception as e:
+        logger.error("Internal error: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
