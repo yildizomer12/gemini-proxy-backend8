@@ -140,36 +140,34 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
                             gemini_chunk = json.loads(json_str)
                             if gemini_chunk.get("candidates"):
                                 for candidate in gemini_chunk["candidates"]:
-                                    # Check for finishReason from Gemini
                                     gemini_finish_reason = candidate.get("finishReason")
                                     
-                                    # Prepare delta content
-                                    delta_content = {}
+                                    # Extract content, if any
+                                    content_text = ""
                                     if candidate.get("content") and candidate["content"].get("parts"):
                                         for part in candidate["content"]["parts"]:
                                             if part.get("text"):
-                                                delta_content["content"] = part["text"]
+                                                content_text = part["text"]
+                                                break # Assuming one text part per chunk for simplicity
 
-                                    # Construct OpenAI-compatible chunk
-                                    openai_chunk = {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": delta_content,
-                                            "finish_reason": gemini_finish_reason.lower() if gemini_finish_reason else None
-                                        }]
-                                    }
+                                    # Send content chunk if there is text
+                                    if content_text:
+                                        content_chunk = {
+                                            "id": chunk_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created,
+                                            "model": model,
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": {"content": content_text},
+                                                "finish_reason": None # No finish reason in content chunks
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(content_chunk)}\n\n"
                                     
-                                    yield f"data: {json.dumps(openai_chunk)}\n\n"
-
+                                    # If Gemini sends a finish reason, send the final empty delta chunk
                                     if gemini_finish_reason:
                                         finish_sent = True
-                                        # If Gemini explicitly sends a finishReason, we are done.
-                                        # Send the final empty delta chunk with finish_reason: "stop"
-                                        # followed by [DONE].
                                         final_empty_delta_chunk = {
                                             "id": chunk_id,
                                             "object": "chat.completion.chunk",
@@ -178,12 +176,12 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
                                             "choices": [{
                                                 "index": 0,
                                                 "delta": {}, # Empty delta
-                                                "finish_reason": "stop"
+                                                "finish_reason": "stop" # Always "stop" for normal completion
                                             }]
                                         }
                                         yield f"data: {json.dumps(final_empty_delta_chunk)}\n\n"
                                         yield "data: [DONE]\n\n"
-                                        return # Terminate the generator
+                                        return # Terminate the generator after sending DONE
                                         
                         except json.JSONDecodeError:
                             print(f"JSON Decode Error for chunk: {json_str}")
@@ -213,7 +211,7 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
                 print("Client disconnected during error handling (BrokenPipeError).")
             return
 
-    # If the loop finishes without a finishReason from Gemini,
+    # Fallback: If the loop finishes without an explicit finishReason from Gemini,
     # ensure the final "stop" chunk and DONE signal are sent.
     if not finish_sent:
         final_chunk = {
