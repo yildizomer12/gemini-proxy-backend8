@@ -194,6 +194,8 @@ async def stream_openai_response(gemini_stream: Any, model: str):
     }
     try:
         yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        await asyncio.sleep(0.1) # Give client a moment to process final bytes before connection close
     except BrokenPipeError:
         logger.warning("Client disconnected during final chunk (BrokenPipeError).")
         return
