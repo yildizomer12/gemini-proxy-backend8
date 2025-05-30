@@ -231,23 +231,24 @@ async def chat_completions(request: ChatRequest):
         )
         
         if not response.is_success:
-            error_detail = f"Gemini API error: {response.status_code}"
+            error_detail = f"Gemini API error: {response.status_code} - {response.text}"
             if response.status_code == 429:
                 error_detail = "Rate limit exceeded, trying another key"
             raise HTTPException(status_code=response.status_code, detail=error_detail)
-        
+
         result = response.json()
-        
+
         # Extract text from response
         text = ""
         if result.get("candidates") and len(result["candidates"]) > 0:
             candidate = result["candidates"][0]
-            if candidate.get("content", {}).get("parts"):
+            if candidate.get("content") and candidate["content"].get("parts"):
                 text = "".join(part.get("text", "") for part in candidate["content"]["parts"])
-        
+
+        # Ensure text is at least an empty string if no content is found
         if not text:
-            text = "No response generated"
-        
+            text = ""
+
         # Streaming response
         if request.stream:
             return StreamingResponse(
