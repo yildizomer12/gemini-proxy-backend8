@@ -164,8 +164,13 @@ async def stream_response(text: str, model: str):
         # DONE sinyali - streaming'in bittiğini belirten zorunlu sinyal
         yield "data: [DONE]\n\n"
         
+    except BrokenPipeError:
+        # Client disconnected, nothing more to do.
+        print("Client disconnected (BrokenPipeError).")
+        return
     except Exception as e:
         # Hata durumunda da düzgün sonlandır
+        print(f"Error during streaming: {e}")
         error_chunk = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
@@ -177,8 +182,12 @@ async def stream_response(text: str, model: str):
                 "finish_reason": "error"
             }]
         }
-        yield f"data: {json.dumps(error_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
+        try:
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        except BrokenPipeError:
+            # Client disconnected during error handling
+            print("Client disconnected during error handling (BrokenPipeError).")
 
 async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict):
     """Gemini API'ye request yapar"""
