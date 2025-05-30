@@ -126,11 +126,11 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
         print("Client disconnected during initial chunk (BrokenPipeError).")
         return
 
+    # Keep track if a finish reason has been explicitly sent from Gemini
+    finish_sent = False
+
     async for chunk in gemini_response.aiter_bytes():
         try:
-            # Each chunk from Gemini is a complete JSON object, but the stream
-            # might concatenate them. We need to split them.
-            # Gemini's SSE stream uses 'data: ' prefix.
             data_str = chunk.decode('utf-8')
             for line in data_str.splitlines():
                 if line.startswith("data: "):
@@ -140,30 +140,61 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
                             gemini_chunk = json.loads(json_str)
                             if gemini_chunk.get("candidates"):
                                 for candidate in gemini_chunk["candidates"]:
+                                    # Check for finishReason from Gemini
+                                    gemini_finish_reason = candidate.get("finishReason")
+                                    
+                                    # Prepare delta content
+                                    delta_content = {}
                                     if candidate.get("content") and candidate["content"].get("parts"):
                                         for part in candidate["content"]["parts"]:
                                             if part.get("text"):
-                                                content_chunk = {
-                                                    "id": chunk_id,
-                                                    "object": "chat.completion.chunk",
-                                                    "created": created,
-                                                    "model": model,
-                                                    "choices": [{
-                                                        "index": 0,
-                                                        "delta": {"content": part["text"]},
-                                                        "finish_reason": None
-                                                    }]
-                                                }
-                                                yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                delta_content["content"] = part["text"]
+
+                                    # Construct OpenAI-compatible chunk
+                                    openai_chunk = {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": delta_content,
+                                            "finish_reason": gemini_finish_reason.lower() if gemini_finish_reason else None
+                                        }]
+                                    }
+                                    
+                                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+
+                                    if gemini_finish_reason:
+                                        finish_sent = True
+                                        # If Gemini explicitly sends a finishReason, we are done.
+                                        # Send the final empty delta chunk with finish_reason: "stop"
+                                        # followed by [DONE].
+                                        final_empty_delta_chunk = {
+                                            "id": chunk_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created,
+                                            "model": model,
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": {}, # Empty delta
+                                                "finish_reason": "stop"
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(final_empty_delta_chunk)}\n\n"
+                                        yield "data: [DONE]\n\n"
+                                        return # Terminate the generator
+                                        
                         except json.JSONDecodeError:
                             print(f"JSON Decode Error for chunk: {json_str}")
-                elif line.strip() == "": # End of data block
+                elif line.strip() == "": # End of data block (empty line after data)
                     pass
         except BrokenPipeError:
             print("Client disconnected during content chunk (BrokenPipeError).")
             return
         except Exception as e:
             print(f"Error processing Gemini stream chunk: {e}")
+            # Error handling chunk, always send DONE
             error_chunk = {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
@@ -180,6 +211,27 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
                 yield "data: [DONE]\n\n"
             except BrokenPipeError:
                 print("Client disconnected during error handling (BrokenPipeError).")
+            return
+
+    # If the loop finishes without a finishReason from Gemini,
+    # ensure the final "stop" chunk and DONE signal are sent.
+    if not finish_sent:
+        final_chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }
+        try:
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        except BrokenPipeError:
+            print("Client disconnected during final chunk (BrokenPipeError).")
             return
 
     # Final chunk - streaming tamamlandı sinyali
