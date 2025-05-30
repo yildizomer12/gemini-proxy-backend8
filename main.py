@@ -169,16 +169,14 @@ async def stream_response(text: str, model: str):
         }
         try:
             yield f"data: {json.dumps(final_chunk)}\n\n"
+            # OpenAI API'sinde [DONE] sinyali genellikle son chunk'tan sonra ayrı bir data satırı olarak gönderilmez.
+            # finish_reason: "stop" ile son chunk'ın gelmesi yeterli olur.
+            # Eğer client hala bekliyorsa, bu client tarafındaki bir implementasyon farkı olabilir.
+            # Şimdilik, DONE sinyalini kaldırıp sadece son chunk ile bitmesini sağlayalım.
+            # await asyncio.sleep(0.1) # Small delay before sending DONE - removed as it's not needed if DONE is removed
+            # yield "data: [DONE]\n\n" # Removed
         except BrokenPipeError:
             print("Client disconnected during final chunk (BrokenPipeError).")
-            return
-        
-        # DONE sinyali - streaming'in bittiğini belirten zorunlu sinyal
-        try:
-            await asyncio.sleep(0.1) # Small delay before sending DONE
-            yield "data: [DONE]\n\n"
-        except BrokenPipeError:
-            print("Client disconnected during DONE signal (BrokenPipeError).")
             return
         
     except Exception as e:
@@ -197,7 +195,7 @@ async def stream_response(text: str, model: str):
         }
         try:
             yield f"data: {json.dumps(error_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n" # Keep DONE for error case to ensure client terminates
         except BrokenPipeError:
             # Client disconnected during error handling
             print("Client disconnected during error handling (BrokenPipeError).")
