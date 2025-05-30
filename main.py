@@ -234,12 +234,11 @@ async def chat_completions(request: ChatRequest): # Keep ChatRequest for now, wi
         # Convert messages
         gemini_messages = convert_messages(request.messages)
         generation_config = {
-            "temperature": request.temperature,
-            "topK": 40, # Assuming default as in previous code
-            "topP": 0.95 # Assuming default as in previous code
+            "temperature": request.temperature
         }
         
-        if request.max_tokens:
+        # Only add maxOutputTokens if it's provided and not None
+        if request.max_tokens is not None:
             generation_config["maxOutputTokens"] = min(request.max_tokens, 8192)
         
         # API key seç
