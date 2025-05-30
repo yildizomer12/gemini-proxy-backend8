@@ -121,7 +121,11 @@ async def stream_response(text: str, model: str):
                 "finish_reason": None
             }]
         }
-        yield f"data: {json.dumps(initial_chunk)}\n\n"
+        try:
+            yield f"data: {json.dumps(initial_chunk)}\n\n"
+        except BrokenPipeError:
+            print("Client disconnected during initial chunk (BrokenPipeError).")
+            return
         
         # Content chunks - metni parçalar halinde gönder
         if text:
@@ -132,7 +136,7 @@ async def stream_response(text: str, model: str):
                 
                 content_chunk = {
                     "id": chunk_id,
-                    "object": "chat.completion.chunk", 
+                    "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
                     "choices": [{
@@ -142,7 +146,11 @@ async def stream_response(text: str, model: str):
                     }]
                 }
                 
-                yield f"data: {json.dumps(content_chunk)}\n\n"
+                try:
+                    yield f"data: {json.dumps(content_chunk)}\n\n"
+                except BrokenPipeError:
+                    print("Client disconnected during content chunk (BrokenPipeError).")
+                    return
                 
                 # Küçük bir gecikme ekle (streaming efekti için)
                 await asyncio.sleep(0.02)
@@ -159,15 +167,19 @@ async def stream_response(text: str, model: str):
                 "finish_reason": "stop"
             }]
         }
-        yield f"data: {json.dumps(final_chunk)}\n\n"
+        try:
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+        except BrokenPipeError:
+            print("Client disconnected during final chunk (BrokenPipeError).")
+            return
         
         # DONE sinyali - streaming'in bittiğini belirten zorunlu sinyal
-        yield "data: [DONE]\n\n"
+        try:
+            yield "data: [DONE]\n\n"
+        except BrokenPipeError:
+            print("Client disconnected during DONE signal (BrokenPipeError).")
+            return
         
-    except BrokenPipeError:
-        # Client disconnected, nothing more to do.
-        print("Client disconnected (BrokenPipeError).")
-        return
     except Exception as e:
         # Hata durumunda da düzgün sonlandır
         print(f"Error during streaming: {e}")
