@@ -137,6 +137,7 @@ async def stream_openai_response(gemini_stream: Any, model: str):
         return
 
     try:
+        await asyncio.sleep(0) # Allow client to process
         for response_chunk in gemini_stream:
             content = getattr(response_chunk, "text", "")
             if content:
@@ -152,6 +153,7 @@ async def stream_openai_response(gemini_stream: Any, model: str):
                     }]
                 }
                 yield f"data: {json.dumps(content_chunk)}\n\n"
+                await asyncio.sleep(0) # Prevent blocking
             
             # Check for finish_reason from Gemini's response_chunk (if available)
             # The genai library handles finish reasons internally, and the stream
@@ -220,7 +222,7 @@ async def chat_completions(request: ChatRequest): # Keep ChatRequest for now, wi
         
         # Only add maxOutputTokens if it's provided and not None
         if request.max_tokens is not None:
-            generation_config["maxOutputTokens"] = min(request.max_tokens, 8192)
+            generation_config["max_output_tokens"] = min(request.max_tokens, 8192)
         
         # API key seç
         api_key = get_next_key()
