@@ -196,6 +196,7 @@ async def stream_gemini_response(gemini_response: httpx.Response, model: str):
     }
     try:
         yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n" # Add DONE signal back for successful completion
     except BrokenPipeError:
         print("Client disconnected during final chunk (BrokenPipeError).")
         return
