@@ -243,10 +243,10 @@ async def chat_completions(request: ChatRequest): # Keep ChatRequest for now, wi
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
                     "Content-Type": "text/event-stream",
                     "X-Accel-Buffering": "no" # Prevent proxy buffering
                 }
+                # Removed "Connection": "keep-alive" to force immediate connection closure
             )
 
         # Regular response (non-streaming)
