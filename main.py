@@ -116,89 +116,23 @@ def convert_messages(messages):
 async def stream_openai_response(gemini_stream: Any, model: str):
     """Stream Gemini response in OpenAI-compatible chunked format."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
-
-    # Initial chunk - role başlangıcı
-    initial_chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant"},
-            "finish_reason": None
-        }]
-    }
-    try:
-        yield f"data: {json.dumps(initial_chunk)}\n\n"
-    except BrokenPipeError:
-        logger.warning("Client disconnected during initial chunk (BrokenPipeError).")
-        return
+    yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
 
     try:
-        await asyncio.sleep(0) # Allow client to process
         for response_chunk in gemini_stream:
             content = getattr(response_chunk, "text", "")
             if content:
-                content_chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": content},
-                        "finish_reason": None
-                    }]
-                }
-                yield f"data: {json.dumps(content_chunk)}\n\n"
-                await asyncio.sleep(0) # Prevent blocking
-            
-            # Check for finish_reason from Gemini's response_chunk (if available)
-            # The genai library handles finish reasons internally, and the stream
-            # will naturally end. We just need to send the final stop chunk.
-
-
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': content}, 'finish_reason': None}]})}\n\n"
+                if DEBUG_ENABLED:
+                    logger.debug("Streaming chunk: content=%s", content[:100])
+            await asyncio.sleep(0)
     except Exception as e:
-        logger.error("Streaming error: %s", str(e))
-        error_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"content": f"Streaming error: {str(e)}"},
-                "finish_reason": "error"
-            }]
-        }
-        try:
-            yield f"data: {json.dumps(error_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-        except BrokenPipeError:
-            logger.warning("Client disconnected during error handling (BrokenPipeError).")
-        return
+        if DEBUG_ENABLED:
+            logger.error("Streaming error: %s", str(e))
+        yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': f'Streaming error: {str(e)}'}, 'finish_reason': 'error'}]})}\n\n"
 
-    # Final chunk - streaming tamamlandı sinyali (empty delta, finish_reason "stop")
-    final_chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {}, # Empty delta
-            "finish_reason": "stop"
-        }]
-    }
-    try:
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
-        await asyncio.sleep(0.1) # Give client a moment to process final bytes before connection close
-    except BrokenPipeError:
-        logger.warning("Client disconnected during final chunk (BrokenPipeError).")
-        return
+    yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 async def make_gemini_request(api_key: str, model: str, messages: list, generation_config: dict, stream: bool = False) -> Any:
