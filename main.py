@@ -241,7 +241,8 @@ async def chat_completions(request: ChatRequest): # Keep ChatRequest for now, wi
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "Content-Type": "text/event-stream"
+                    "Content-Type": "text/event-stream",
+                    "X-Accel-Buffering": "no" # Prevent proxy buffering
                 }
             )
 
