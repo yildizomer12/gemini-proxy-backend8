@@ -157,7 +157,6 @@ async def stream_openai_response(gemini_stream: Any, model: str):
             # The genai library handles finish reasons internally, and the stream
             # will naturally end. We just need to send the final stop chunk.
 
-            await asyncio.sleep(0) # Allow other tasks to run
 
     except Exception as e:
         logger.error("Streaming error: %s", str(e))
